@@ -9,7 +9,7 @@ import { circuitLayouts } from './circuitLayouts.js'
 import {
   ArrowDownRight, ArrowRight, ArrowUpRight, CalendarDays, ChevronDown,
   ChevronLeft, ChevronRight, Clock3, ExternalLink, Gauge, MapPin, Menu,
-  Radio, Search, ShieldCheck, Trophy, X, Zap, Globe2,
+  Play, Radio, Search, ShieldCheck, Trophy, Volume2, VolumeX, X, Zap, Globe2,
 } from 'lucide-react'
 
 const races = [
@@ -206,6 +206,7 @@ function IntroSequence({ onComplete }) {
   const [stage, setStage] = useState('loading')
   const [videoReady, setVideoReady] = useState(false)
   const [loadingDelayComplete, setLoadingDelayComplete] = useState(false)
+  const [isMuted, setIsMuted] = useState(true)
   const [videoError, setVideoError] = useState(false)
   const videoRef = useRef(null)
   const audioRef = useRef(null)
@@ -216,8 +217,10 @@ function IntroSequence({ onComplete }) {
   }, [])
 
   useEffect(() => {
-    if (videoReady && loadingDelayComplete) setStage('video')
-  }, [videoReady, loadingDelayComplete])
+    if (videoReady && loadingDelayComplete && stage === 'loading') {
+      setStage('video')
+    }
+  }, [videoReady, loadingDelayComplete, stage])
 
   useEffect(() => {
     if (stage === 'video') {
@@ -228,25 +231,88 @@ function IntroSequence({ onComplete }) {
   const startPlayback = async () => {
     const video = videoRef.current
     const audio = audioRef.current
-    if (!video || !audio) return
+    if (!video) return
 
+    // Video is muted, so modern browsers always allow it to autoplay without user interaction
     try {
-      audio.currentTime = video.currentTime
-      await Promise.all([video.play(), audio.play()])
-      setVideoError(false)
-    } catch (error) {
-      video.pause()
-      audio.pause()
-      console.error('Unable to play the intro video and audio:', error)
-      setVideoError(true)
+      await video.play()
+    } catch (err) {
+      console.warn('Video play deferred:', err)
+    }
+
+    // Try playing audio: if browser policy allows, it plays; otherwise wait for click to unmute
+    if (audio) {
+      try {
+        audio.currentTime = video.currentTime || 0
+        await audio.play()
+        setIsMuted(false)
+      } catch (err) {
+        console.info('Audio autoplay waiting for user interaction (click anywhere to unmute).')
+        setIsMuted(true)
+      }
     }
   }
 
+  const toggleSound = async (e) => {
+    e?.stopPropagation()
+    const video = videoRef.current
+    const audio = audioRef.current
+    if (!audio || !video) return
+
+    if (isMuted) {
+      try {
+        audio.currentTime = video.currentTime || 0
+        await audio.play()
+        setIsMuted(false)
+      } catch (err) {
+        console.error('Failed to unmute audio:', err)
+      }
+    } else {
+      audio.pause()
+      setIsMuted(true)
+    }
+  }
+
+  const handleContainerClick = (e) => {
+    if (e.target.closest('.intro-skip') || e.target.closest('.intro-sound-toggle') || e.target.closest('.intro-start-btn')) return
+    if (isMuted && stage === 'video') {
+      toggleSound()
+    }
+  }
+
+  const startNowWithGesture = (e) => {
+    e?.stopPropagation()
+    setStage('video')
+    setTimeout(() => {
+      startPlayback()
+      toggleSound()
+    }, 50)
+  }
+
+  const handleTimeUpdate = () => {
+    const video = videoRef.current
+    const audio = audioRef.current
+    if (!video || !audio || isMuted || audio.paused) return
+    // Resync if audio and video drift by more than 0.3s
+    if (Math.abs(video.currentTime - audio.currentTime) > 0.3) {
+      audio.currentTime = video.currentTime
+    }
+  }
+
+  const handleVideoPlay = () => {
+    const video = videoRef.current
+    const audio = audioRef.current
+    if (!video || !audio || isMuted) return
+    audio.currentTime = video.currentTime || 0
+    audio.play().catch(() => {})
+  }
+
   const handlePlaybackError = (error) => {
-    videoRef.current?.pause()
-    audioRef.current?.pause()
-    console.error('Unable to load the intro video or audio:', error)
-    setVideoError(true)
+    const video = videoRef.current
+    if (video?.error) {
+      console.error('Video failed to load:', error)
+      setVideoError(true)
+    }
   }
 
   const finishIntro = () => {
@@ -255,12 +321,8 @@ function IntroSequence({ onComplete }) {
     onComplete()
   }
 
-  const retryVideo = () => {
-    startPlayback()
-  }
-
   return (
-    <div className="intro-screen">
+    <div className="intro-screen" onClick={handleContainerClick}>
       {stage === 'loading' && (
         <>
           <img className="intro-loading-image" src={loadingImage} alt="Formula Vault" />
@@ -278,10 +340,20 @@ function IntroSequence({ onComplete }) {
                 <span />
               </div>
               <span className="intro-loading-caption">LOADING YOUR RACE WEEKEND</span>
+              <div style={{ marginTop: '18px', pointerEvents: 'auto' }}>
+                <button
+                  type="button"
+                  className="intro-start-btn"
+                  onClick={startNowWithGesture}
+                >
+                  START RACE EXPERIENCE <Play size={13} fill="currentColor" />
+                </button>
+              </div>
             </div>
           </div>
         </>
       )}
+
       <video
         ref={videoRef}
         className={`intro-video ${stage === 'loading' ? 'intro-video-preload' : ''}`}
@@ -289,25 +361,56 @@ function IntroSequence({ onComplete }) {
         preload="auto"
         muted
         playsInline
+        autoPlay
         onCanPlay={() => setVideoReady(true)}
+        onLoadedData={() => setVideoReady(true)}
+        onPlay={handleVideoPlay}
         onPause={() => audioRef.current?.pause()}
+        onWaiting={() => audioRef.current?.pause()}
+        onTimeUpdate={handleTimeUpdate}
         onEnded={finishIntro}
         onError={(event) => handlePlaybackError(event.currentTarget.error)}
       />
-      <button className="intro-skip" type="button" onClick={finishIntro}>
-        SKIP INTRO <ArrowRight size={15} />
-      </button>
+
+      <div className="intro-controls">
+        <button
+          className={`intro-sound-toggle ${isMuted ? 'muted' : ''}`}
+          type="button"
+          onClick={toggleSound}
+          title={isMuted ? "Click to unmute sound" : "Mute sound"}
+          aria-label={isMuted ? "Unmute sound" : "Mute sound"}
+        >
+          {isMuted ? <VolumeX size={15} /> : <Volume2 size={15} />}
+          <span>{isMuted ? 'UNMUTE SOUND' : 'SOUND ON'}</span>
+        </button>
+
+        <button className="intro-skip" type="button" onClick={finishIntro}>
+          SKIP INTRO <ArrowRight size={15} />
+        </button>
+      </div>
+
+      {stage === 'video' && isMuted && (
+        <button
+          type="button"
+          className="intro-unmute-banner"
+          onClick={toggleSound}
+        >
+          <Volume2 size={14} />
+          <span>CLICK ANYWHERE FOR SOUND</span>
+        </button>
+      )}
+
       <audio
         ref={audioRef}
         src={introAudio}
         preload="auto"
-        onError={(event) => handlePlaybackError(event.currentTarget.error)}
       />
+
       {videoError && (
         <div className="intro-error" role="alert">
-          <p>The intro video or audio could not be played. Your browser may require a click to allow audio.</p>
+          <p>The intro video could not be loaded on your network connection.</p>
           <div>
-            <button type="button" onClick={retryVideo}>TRY AGAIN</button>
+            <button type="button" onClick={() => { setVideoError(false); startPlayback(); }}>TRY AGAIN</button>
             <button type="button" onClick={finishIntro}>CONTINUE TO SITE</button>
           </div>
         </div>
@@ -318,6 +421,15 @@ function IntroSequence({ onComplete }) {
 
 function App() {
   const [introComplete, setIntroComplete] = useState(false)
+
+  useEffect(() => {
+    if (introComplete && window.location.hash) {
+      const target = document.querySelector(window.location.hash)
+      if (target) {
+        setTimeout(() => target.scrollIntoView({ behavior: 'smooth' }), 120)
+      }
+    }
+  }, [introComplete])
 
   if (!introComplete) {
     return <IntroSequence onComplete={() => setIntroComplete(true)} />
